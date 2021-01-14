@@ -1251,10 +1251,12 @@ loop:
 	log_write_mutex_enter();
 	ut_ad(!recv_no_log_write);
 
+	/* 将limit_lsn设为当前已经写入的lsn值 */
 	lsn_t	limit_lsn = flush_to_disk
 		? log_sys->flushed_to_disk_lsn
 		: log_sys->write_lsn;
 
+	/* 如果当前的limit_lsn大于等于要求写入的lsn，即传入lsn对应的redo log已经写盘，直接放锁返回。 */
 	if (limit_lsn >= lsn) {
 		log_write_mutex_exit();
 		return;
@@ -1281,18 +1283,23 @@ loop:
 	be. If we have to flush as well then we check if there is a
 	pending flush and based on that we wait for it to finish
 	before proceeding further. */
+	/* 如果limit_lsn < lsn，即确实有数据要落盘，则进行写盘操作 */
+	/* 如果有一个flush正在进行 */
 	if (flush_to_disk
 	    && (log_sys->n_pending_flushes > 0
 		|| !os_event_is_set(log_sys->flush_event))) {
 
 		/* Figure out if the current flush will do the job
 		for us. */
+		/* 看下当前flush任务能否将包含lsn的redo写盘 */
 		bool work_done = log_sys->current_flush_lsn >= lsn;
 
 		log_write_mutex_exit();
 
+		/* 无论能否包含都要等待当前的flush完成 */
 		os_event_wait(log_sys->flush_event);
 
+		/* 如果当前的flush能将包含此lsn的redo写盘，则直接返回 */
 		if (work_done) {
 			return;
 		} else {
@@ -1308,6 +1315,7 @@ loop:
 		return;
 	}
 
+	/* 下面是最后的情况，即没有正在运行的flush。则开始对传入的lsn进行写盘 */
 	log_group_t*	group;
 	ulint		start_offset;
 	ulint		end_offset;
@@ -1938,15 +1946,17 @@ loop:
 	log_mutex_enter();
 	ut_ad(!recv_no_log_write);
 
+	/* 判断是否需要执行flush或者checkpoint，不需要则直接返回 */
 	if (!log->check_flush_or_checkpoint) {
 		log_mutex_exit();
 		return;
 	}
 
+	/* 找出当前所有buffer pool实例中最老的LSN，实际上直接读取每个flush_list的尾部即可 */
 	oldest_lsn = log_buf_pool_get_oldest_modification();
 
 	age = log->lsn - oldest_lsn;
-
+	/* 如果计算的age大于max_modified_age_sync，则需要做一次同步刷新 */
 	if (age > log->max_modified_age_sync) {
 
 		/* A flush is urgent: we have to do a synchronous preflush */
@@ -1958,6 +1968,7 @@ loop:
 	bool	checkpoint_sync;
 	bool	do_checkpoint;
 
+	/* 计算checkpoint_age，并判断是否需要做checkpoint以及是否需要同步 */
 	if (checkpoint_age > log->max_checkpoint_age) {
 		/* A checkpoint is urgent: we do it synchronously */
 		checkpoint_sync = true;
@@ -1978,11 +1989,13 @@ loop:
 	if (advance) {
 		lsn_t	new_oldest = oldest_lsn + advance;
 
+		/* 需要同步刷新，则将LSN推进到新的LSN位置 */
 		success = log_preflush_pool_modified_pages(new_oldest);
 
 		/* If the flush succeeded, this thread has done its part
 		and can proceed. If it did not succeed, there was another
 		thread doing a flush at the same time. */
+		/* 如果失败说明有其它的线程在处理 */
 		if (!success) {
 			log_mutex_enter();
 

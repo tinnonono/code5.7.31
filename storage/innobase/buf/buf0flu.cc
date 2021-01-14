@@ -3149,6 +3149,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 
 		os_event_wait(recv_sys->flush_start);
 
+		/* 服务器没有关闭的状态下 */
 		if (srv_shutdown_state != SRV_SHUTDOWN_NONE
 		    || recv_sys->heap == NULL) {
 			break;
@@ -3193,10 +3194,11 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 		/* The page_cleaner skips sleep if the server is
 		idle and there are no pending IOs in the buffer pool
 		and there is work to do. */
+		/* 检查当前服务器的活动次数 */
 		if (srv_check_activity(last_activity)
 		    || buf_get_n_pending_read_ios()
 		    || n_flushed == 0) {
-
+			/* 休眠min(1000000,(next_loop_time-当前时间)*1000)) */	
 			ret_sleep = pc_sleep_if_needed(
 				next_loop_time, sig_count);
 
@@ -3243,6 +3245,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 				warn_count = 0;
 			}
 
+			/* 重新计算当前next_loop_time值 */
 			next_loop_time = curr_time + 1000;
 			n_flushed_last = n_evicted = 0;
 		}
@@ -3286,7 +3289,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 
 			n_flushed = n_flushed_lru + n_flushed_list;
 
-		} else if (srv_check_activity(last_activity)) {
+		} else if (srv_check_activity(last_activity)) {   /* 检查当前服务器活动数量 */
 			ulint	n_to_flush;
 			lsn_t	lsn_limit = 0;
 
@@ -3352,6 +3355,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 
 		} else if (ret_sleep == OS_SYNC_TIME_EXCEEDED) {
 			/* no activity, slept enough */
+			/* 刷新srv_io_capacity个脏页到磁盘 */
 			buf_flush_lists(PCT_IO(100), LSN_MAX, &n_flushed);
 
 			n_flushed_last += n_flushed;
