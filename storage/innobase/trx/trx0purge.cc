@@ -1694,6 +1694,7 @@ trx_purge_attach_undo_recs(
 		}
 
 		/* Fetch the next record, and advance the purge_sys->iter. */
+		/* 从可能需要清理的purge_queue中取出undo segment(简单理解为事务) */
 		purge_rec->undo_rec = trx_purge_fetch_next_rec(
 			&purge_rec->roll_ptr, &n_pages_handled, node->heap);
 
@@ -1845,6 +1846,7 @@ trx_purge(
 
 	purge_sys->view_active = false;
 
+	/* 清理undo需要根据当前最老的read view来清理，否则可能清理到正在读取需要的undo */
 	trx_sys->mvcc->clone_oldest_view(&purge_sys->view);
 
 	purge_sys->view_active = true;
@@ -1858,10 +1860,12 @@ trx_purge(
 #endif /* UNIV_DEBUG */
 
 	/* Fetch the UNDO recs that need to be purged. */
+	/* 从可能需要清理的purge_queue中取出undo segment(简单理解为事务)并进行purge */
 	n_pages_handled = trx_purge_attach_undo_recs(
 		n_purge_threads, purge_sys, batch_size);
 
 	/* Do we do an asynchronous purge or not ? */
+	/* 如果有多个purge线程，则对每个purge线程进行工作调度 */
 	if (n_purge_threads > 1) {
 		ulint	i = 0;
 
@@ -1880,16 +1884,19 @@ trx_purge(
 
 		purge_sys->n_submitted += n_purge_threads - 1;
 
+		/* 多线程需要等待所有线程都完成工作 */
 		goto run_synchronously;
 
 	/* Do it synchronously. */
 	} else {
+		/* 如果只有一个purge线程，则对该线程进行工作调度 */
 		thr = que_fork_scheduler_round_robin(purge_sys->query, NULL);
 		ut_ad(thr);
 
 run_synchronously:
 		++purge_sys->n_submitted;
 
+		/* 开始线程工作 */
 		que_run_threads(thr);
 
 		os_atomic_inc_ulint(

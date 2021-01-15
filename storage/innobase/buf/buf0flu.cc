@@ -117,7 +117,12 @@ enum page_cleaner_state_t {
 };
 
 /** Page cleaner request state for each buffer pool instance */
+/* 
+	每个buffer instance都包含一个这样的结构体，page clean工作线程刷新的时候每个线程都会轮询的检测每个槽，
+	直到找到没有被其他page clean线程刷新的槽进行刷新工作或者所有的槽（buffer instance ）都刷新完成为止。
+*/
 struct page_cleaner_slot_t {
+	/* 状态PAGE_CLEANER_STATE_REQUESTED、PAGE_CLEANER_STATE_FLUSHING和PAGE_CLEANER_STATE_FINISHED中的一种 */
 	page_cleaner_state_t	state;	/*!< state of the request.
 					protected by page_cleaner_t::mutex
 					if the worker thread got the slot and
@@ -125,6 +130,7 @@ struct page_cleaner_slot_t {
 					n_flushed_lru and n_flushed_list can be
 					updated only by the worker thread */
 	/* This value is set during state==PAGE_CLEANER_STATE_NONE */
+	/* 本槽需要刷新的总的块数量 */
 	ulint			n_pages_requested;
 					/*!< number of requested pages
 					for the slot */
@@ -134,17 +140,21 @@ struct page_cleaner_slot_t {
 	ulint			n_flushed_lru;
 					/*!< number of flushed pages
 					by LRU scan flushing */
+	/* 已经刷新的块数  */				
 	ulint			n_flushed_list;
 					/*!< number of flushed pages
 					by flush_list flushing */
+	/* 布尔值，刷新是否完成 */				
 	bool			succeeded_list;
 					/*!< true if flush_list flushing
 					succeeded. */
+	/* 本槽刷新消耗的时间（累计参考pc_flush_slot函数） */				
 	uint64_t		flush_lru_time;
-					/*!< elapsed time for LRU flushing */
+					/*!< elapsed time for LRU flushing */				
 	uint64_t		flush_list_time;
 					/*!< elapsed time for flush_list
 					flushing */
+	/* 本槽进行刷新操作的次数（累计参考pc_flush_slot函数） */
 	ulint			flush_lru_pass;
 					/*!< count to attempt LRU flushing */
 	ulint			flush_list_pass;
@@ -153,38 +163,53 @@ struct page_cleaner_slot_t {
 };
 
 /** Page cleaner structure common for all threads */
+/* 整个Innodb只有一个，包含整个page clean线程相关信息。其中包含了一个page_cleaner_slot_t的指针。 */
 struct page_cleaner_t {
+	/* 用于保护整个page_cleaner_t结构体和page_cleaner_slot_t结构体，当需要修改结构体信息的时候需要获取这个mutex， 如在pc_request函数中 */
 	ib_mutex_t		mutex;		/*!< mutex to protect whole of
 						page_cleaner_t struct and
 						page_cleaner_slot_t slots. */
+	/* 一个条件变量，用于唤醒堵塞在这个条件之上的工作线程  */
 	os_event_t		is_requested;	/*!< event to activate worker
 						threads. */
+	/*  一个条件变量，用于通知协调线程刷新工作已经完成 */					
 	os_event_t		is_finished;	/*!< event to signal that all
 						slots were finished. */
+	/* 当前存在的工作线程总数 */					
 	volatile ulint		n_workers;	/*!< number of worker threads
 						in existence */
+	/* 布尔值，当前是否需要进行脏数据刷新工作 */					
 	bool			requested;	/*!< true if requested pages
 						to flush */
+	/* 需要刷新到lsn的位置，当需要同步刷新的时候，这个值将被赋予，以保证小于这个lsn的日志都已经完成了刷盘工作 */					
 	lsn_t			lsn_limit;	/*!< upper limit of LSN to be
 						flushed */
+	/* 槽的数量，槽的数量和buffer instance的数量相同 */					
 	ulint			n_slots;	/*!< total number of slots */
+	/* 当前处于需要刷新状态下(PAGE_CLEANER_STATE_REQUESTED)的槽的数量 */
 	ulint			n_slots_requested;
 						/*!< number of slots
 						in the state
 						PAGE_CLEANER_STATE_REQUESTED */
+	/* 当前处于刷新状态下(PAGE_CLEANER_STATE_FLUSHING)的槽的数量 */					
 	ulint			n_slots_flushing;
 						/*!< number of slots
 						in the state
 						PAGE_CLEANER_STATE_FLUSHING */
+	/* 当前处于已经刷新完成状态下(PAGE_CLEANER_STATE_FINISHED)的槽的数量  */					
 	ulint			n_slots_finished;
 						/*!< number of slots
 						in the state
 						PAGE_CLEANER_STATE_FINISHED */
+	/* 整个(以innodb buffer为单位)刷新消耗的时间（累计 page_cleaner->flush_time += ut_time_ms() - tm;） */					
 	uint64_t		flush_time;	/*!< elapsed time to flush
 						requests for all slots */
+	/* 整个(以innodb buffer为单位)刷新的次数（累计 page_cleaner->flush_pass++;） */					
 	ulint			flush_pass;	/*!< count to finish to flush
 						requests for all slots */
+	/* 指针指向实际的槽 */					
 	page_cleaner_slot_t*	slots;		/*!< pointer to the slots */
+	/* 布尔值，如果关闭innodb会被设置为false，进行强行刷新脏数据 */
 	bool			is_running;	/*!< false if attempt
 						to shutdown */
 
@@ -3099,6 +3124,7 @@ buf_flush_page_cleaner_disabled_debug_update(
 page_cleaner thread tasked with flushing dirty pages from the buffer
 pools. As of now we'll have only one coordinator.
 @return a dummy parameter */
+/* page cleaner线程从buffer pool中刷脏页 */
 extern "C"
 os_thread_ret_t
 DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
@@ -3190,6 +3216,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 	int64_t		sig_count = os_event_reset(buf_flush_event);
 
 	while (srv_shutdown_state == SRV_SHUTDOWN_NONE) {
+		/* 这个睡眠是可以被唤醒的，比如同步刷新应该就会唤醒它（buf_flush_request_force函数）。参考函数os_event::wait_time_low */
 
 		/* The page_cleaner skips sleep if the server is
 		idle and there are no pending IOs in the buffer pool
@@ -3205,6 +3232,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 			if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
 				break;
 			}
+		/* 如果当前时间大于 上次刷新 时间+1 秒则 设置为OS_SYNC_TIME_EXCEEDED */
 		} else if (ut_time_monotonic_ms() > next_loop_time) {
 			ret_sleep = OS_SYNC_TIME_EXCEEDED;
 		} else {
@@ -3217,6 +3245,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 			ib_time_monotonic_ms_t curr_time =
 						ut_time_monotonic_ms();
 
+			/* 如果刷新时间 大于了 上次时间 +1 秒+3 秒 则报info */
 			if (curr_time > next_loop_time + 3000) {
 				if (warn_count == 0) {
 					ib::info() << "page_cleaner: 1000ms"
@@ -3250,6 +3279,10 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 			n_flushed_last = n_evicted = 0;
 		}
 
+		/*  
+			同步会唤醒正在睡眠状态的page clean协调工作线程那么睡眠应该不会满足一秒的条件所以不会被标记为OS_SYNC_TIME_EXCEEDED，
+			同时srv_flush_sync和buf_flush_sync_lsn均会被设置接下来就是唤醒工作线程进行刷新，同时本协调线程也完成部分任务。
+		*/
 		if (ret_sleep != OS_SYNC_TIME_EXCEEDED
 		    && srv_flush_sync
 		    && buf_flush_sync_lsn > 0) {
@@ -3260,11 +3293,13 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 			mutex_exit(&page_cleaner->mutex);
 
 			/* Request flushing for threads */
+			/* 唤醒page clean 工作线程干活 */
 			pc_request(ULINT_MAX, lsn_limit);
 
 			ib_time_monotonic_ms_t tm = ut_time_monotonic_ms();
 
 			/* Coordinator also treats requests */
+			/* 协调者同样要完成部分任务 */
 			while (pc_flush_slot() > 0) {}
 
 			/* only coordinator is using these counters,

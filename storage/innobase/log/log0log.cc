@@ -1622,14 +1622,17 @@ log_group_checkpoint(
 	buf = group->checkpoint_buf;
 	memset(buf, 0, OS_FILE_LOG_BLOCK_SIZE);
 
+	/* 写 Checkpoint block内容：LOG_CHECKPOINT_NO、LOG_CHECKPOINT_LSN */
 	mach_write_to_8(buf + LOG_CHECKPOINT_NO, log_sys->next_checkpoint_no);
 	mach_write_to_8(buf + LOG_CHECKPOINT_LSN, log_sys->next_checkpoint_lsn);
 
+	/* 写 Checkpoint block内容：LOG_CHECKPOINT_OFFSET、LOG_CHECKPOINT_LOG_BUF_SIZE */
 	lsn_offset = log_group_calc_lsn_offset(log_sys->next_checkpoint_lsn,
 					       group);
 	mach_write_to_8(buf + LOG_CHECKPOINT_OFFSET, lsn_offset);
 	mach_write_to_8(buf + LOG_CHECKPOINT_LOG_BUF_SIZE, log_sys->buf_size);
 
+	/* 计算block的checksum */
 	log_block_set_checksum(buf, log_block_calc_checksum_crc32(buf));
 
 	MONITOR_INC(MONITOR_PENDING_CHECKPOINT_WRITE);
@@ -1653,6 +1656,7 @@ log_group_checkpoint(
 	added with 1, as we want to distinguish between a normal log
 	file write and a checkpoint field write */
 
+	/* 根据log_sys->next_checkpoint_no的最低位决定写哪一个checkpoint block */
 	fil_io(IORequestLogWrite, false,
 	       page_id_t(group->space_id, 0),
 	       univ_page_size,

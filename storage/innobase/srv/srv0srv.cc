@@ -2110,6 +2110,7 @@ srv_master_do_active_tasks(void)
 	/* First do the tasks that we are suppose to do at each
 	invocation of this function. */
 
+	/* 首先增加此变量，记录该函数调用了多少次，srv_main_active_loops为全局变量 */
 	++srv_main_active_loops;
 
 	MONITOR_INC(MONITOR_MASTER_ACTIVE_LOOPS);
@@ -2118,6 +2119,7 @@ srv_master_do_active_tasks(void)
 	can drop tables lazily after there no longer are SELECT
 	queries to them. */
 	srv_main_thread_op_info = "doing background drop tables";
+	/* 如果有ALTER TABLE查询，现在进行真正的alter table操作 */
 	row_drop_tables_for_mysql_in_background();
 	MONITOR_INC_TIME_IN_MICRO_SECS(
 		MONITOR_SRV_BACKGROUND_DROP_TABLE_MICROSECOND, counter_time);
@@ -2130,10 +2132,12 @@ srv_master_do_active_tasks(void)
 
 	/* make sure that there is enough reusable space in the redo
 	log files */
+	/* 检查redo log file可重用空间是否足够 */
 	srv_main_thread_op_info = "checking free log space";
 	log_free_check();
 
 	/* Do an ibuf merge */
+	/* 进行insert buffer的merge */
 	srv_main_thread_op_info = "doing insert buffer merge";
 	counter_time = ut_time_monotonic_us();
 	ibuf_merge_in_background(false);
@@ -2141,6 +2145,7 @@ srv_master_do_active_tasks(void)
 		MONITOR_SRV_IBUF_MERGE_MICROSECOND, counter_time);
 
 	/* Flush logs if needed */
+	/* 进行redo log的刷盘 */
 	srv_main_thread_op_info = "flushing log";
 	srv_sync_log_buffer_in_background();
 	MONITOR_INC_TIME_IN_MICRO_SECS(
@@ -2161,6 +2166,7 @@ srv_master_do_active_tasks(void)
 		srv_wake_purge_thread_if_not_active();
 	}
 
+	/* 每47s执行一次，执行一次table cache的清理 */
 	if (cur_time % SRV_MASTER_DICT_LRU_INTERVAL == 0) {
 		srv_main_thread_op_info = "enforcing dict cache limit";
 		ulint	n_evicted = srv_master_evict_from_table_cache(50);
@@ -2177,6 +2183,7 @@ srv_master_do_active_tasks(void)
 	}
 
 	/* Make a new checkpoint */
+	/* 每7s进行一次checkpoint */
 	if (cur_time % SRV_MASTER_CHECKPOINT_INTERVAL == 0) {
 		srv_main_thread_op_info = "making checkpoint";
 		log_checkpoint(TRUE, FALSE);
@@ -2193,6 +2200,10 @@ the function without completing the required tasks.
 Note that the server can move to active state when we are executing this
 function but we don't check for that as we are suppose to perform more
 or less same tasks when server is active. */
+/* 
+	当master thread进入shutdown state时退出此函数；
+	执行此函数时不会在意此时master thread是否由idle转为active状态 
+*/
 static
 void
 srv_master_do_idle_tasks(void)
@@ -2210,6 +2221,7 @@ srv_master_do_idle_tasks(void)
 	queries to them. */
 	counter_time = ut_time_monotonic_us();
 	srv_main_thread_op_info = "doing background drop tables";
+	/* 进行实际的ALTER TABLE操作 */
 	row_drop_tables_for_mysql_in_background();
 	MONITOR_INC_TIME_IN_MICRO_SECS(
 		MONITOR_SRV_BACKGROUND_DROP_TABLE_MICROSECOND,
@@ -2224,11 +2236,13 @@ srv_master_do_idle_tasks(void)
 	/* make sure that there is enough reusable space in the redo
 	log files */
 	srv_main_thread_op_info = "checking free log space";
+	/* 检查redo log file空间是否足够 */
 	log_free_check();
 
 	/* Do an ibuf merge */
 	counter_time = ut_time_monotonic_us();
 	srv_main_thread_op_info = "doing insert buffer merge";
+	/* 进行insert buf的merge */
 	ibuf_merge_in_background(true);
 	MONITOR_INC_TIME_IN_MICRO_SECS(
 		MONITOR_SRV_IBUF_MERGE_MICROSECOND, counter_time);
@@ -2242,6 +2256,7 @@ srv_master_do_idle_tasks(void)
 	}
 
 	srv_main_thread_op_info = "enforcing dict cache limit";
+	/* 执行一次table cache的清理 */
 	ulint	n_evicted = srv_master_evict_from_table_cache(100);
 	if (n_evicted != 0) {
 		MONITOR_INC_VALUE(
@@ -2251,6 +2266,7 @@ srv_master_do_idle_tasks(void)
 		MONITOR_SRV_DICT_LRU_MICROSECOND, counter_time);
 
 	/* Flush logs if needed */
+	/* redo log刷盘 */
 	srv_sync_log_buffer_in_background();
 	MONITOR_INC_TIME_IN_MICRO_SECS(
 		MONITOR_SRV_LOG_FLUSH_MICROSECOND, counter_time);
@@ -2260,6 +2276,7 @@ srv_master_do_idle_tasks(void)
 	}
 
 	/* Make a new checkpoint */
+	/* 做checkpoint */
 	srv_main_thread_op_info = "making checkpoint";
 	log_checkpoint(TRUE, FALSE);
 	MONITOR_INC_TIME_IN_MICRO_SECS(MONITOR_SRV_CHECKPOINT_MICROSECOND,
@@ -2349,6 +2366,7 @@ srv_master_sleep(void)
 /*********************************************************************//**
 The master thread controlling the server.
 @return a dummy parameter */
+/* master thread */
 extern "C"
 os_thread_ret_t
 DECLARE_THREAD(srv_master_thread)(
@@ -2360,6 +2378,7 @@ DECLARE_THREAD(srv_master_thread)(
 	my_thread_init();
 	DBUG_ENTER("srv_master_thread");
 
+	/* 初始化 */
 	srv_slot_t*	slot;
 	ulint		old_activity_count = srv_get_activity_count();
 	ib_time_monotonic_t	last_print_time;
@@ -2372,31 +2391,42 @@ DECLARE_THREAD(srv_master_thread)(
 #endif /* UNIV_DEBUG_THREAD_CREATION */
 
 #ifdef UNIV_PFS_THREAD
+	/* 注册当前线程到performance schema */
 	pfs_register_thread(srv_master_thread_key);
 #endif /* UNIV_PFS_THREAD */
 
+	/* 获取线程id的线程号 */
 	srv_main_thread_process_no = os_proc_get_number();
+	/* 获取线程id的int值 */
 	srv_main_thread_id = os_thread_pf(os_thread_get_curr_id());
 
+	/* 分配一个slot，slot相当于thread table的一个表项 */
 	slot = srv_reserve_slot(SRV_MASTER);
 	ut_a(slot == srv_sys->sys_threads);
 
 	last_print_time = ut_time_monotonic();
+
+/* 下面的循环包括master thread开始与结束，和正常工作的循环 */
 loop:
 	if (srv_force_recovery >= SRV_FORCE_NO_BACKGROUND) {
 		goto suspend_thread;
 	}
 
+	/* 下面的循环为正常工作时的循环 */
 	while (srv_shutdown_state == SRV_SHUTDOWN_NONE) {
 
 		srv_master_sleep();
 
 		MONITOR_INC(MONITOR_MASTER_THREAD_SLEEP);
 
+		/* 如果当前为活动状态 */
 		if (srv_check_activity(old_activity_count)) {
+			/* 更新计数器，用srv_sys->activity_count来赋值 */
 			old_activity_count = srv_get_activity_count();
+			/* 执行active_task */
 			srv_master_do_active_tasks();
 		} else {
+			/* 执行idle_task */
 			srv_master_do_idle_tasks();
 		}
 	}
@@ -2690,6 +2720,11 @@ srv_purge_coordinator_suspend(
 		if (stop) {
 			os_event_wait_low(slot->event, sig_count);
 			ret = 0;
+			/* 
+				如果当前history_len大于等于上一次循环的的history_len 
+				等待10毫秒后进行处理或者等待被唤醒 
+				唤醒的条件是有事务提交或者回滚  srv_active_wake_master_thread
+			*/
 		} else if (rseg_history_len <= trx_sys->rseg_history_len) {
 			ret = os_event_wait_time_low(
 				slot->event, SRV_PURGE_MAX_TIMEOUT, sig_count);
@@ -2732,7 +2767,10 @@ srv_purge_coordinator_suspend(
 
 		rw_lock_x_unlock(&purge_sys->latch);
 
-		if (ret == OS_SYNC_TIME_EXCEEDED) {
+		/*  
+			如果长期没有新的事务进行提交，那么可能进入永久堵塞状态而不是每10毫秒醒来，直到唤醒
+		*/
+		if (ret == OS_SYNC_TIME_EXCEEDED) {	/* 如果是等待超时 */
 
 			/* No new records added since wait started then simply
 			wait for new records. The magic number 5000 is an
@@ -2740,9 +2778,10 @@ srv_purge_coordinator_suspend(
 			log records which prevent truncate of the UNDO
 			segments. */
 
+			/* 如果上次的history_len和本次history_len相同且小于5000那么需要等待唤醒 */
 			if (rseg_history_len == trx_sys->rseg_history_len
 			    && trx_sys->rseg_history_len < 5000) {
-
+				/* 置为true，进行无限期等待，直到唤醒 */
 				stop = true;
 			}
 		}
@@ -2763,6 +2802,14 @@ srv_purge_coordinator_suspend(
 /*********************************************************************//**
 Purge coordinator thread that schedules the purge tasks.
 @return a dummy parameter */
+/*  
+	purge线程，后台线程，致力于innodb清理，资源回收操作。
+	1、清理undo页
+		undo记录修改前的数据用于回滚，已提交的时候，不再回滚，即可清理该undo信息。
+	2、清理page里面的有“deleted”标签的数据行
+		1、当我们delete数据行时，是对数据页中要删除的数据行做标记“deleted”，事务提交(速度快)；
+		2、后台线程purge线程对数据页中有“deleted”标签的数据行进行真正的删除。
+*/
 extern "C"
 os_thread_ret_t
 DECLARE_THREAD(srv_purge_coordinator_thread)(
@@ -2803,7 +2850,7 @@ DECLARE_THREAD(srv_purge_coordinator_thread)(
 		if (srv_shutdown_state == SRV_SHUTDOWN_NONE
 		    && (purge_sys->state == PURGE_STATE_STOP
 			|| n_total_purged == 0)) {
-
+			/* 协调线程循环检测变化 */
 			srv_purge_coordinator_suspend(slot, rseg_history_len);
 		}
 
@@ -2814,6 +2861,7 @@ DECLARE_THREAD(srv_purge_coordinator_thread)(
 
 		n_total_purged = 0;
 
+		/* 执行purge */
 		rseg_history_len = srv_do_purge(
 			srv_n_purge_threads, &n_total_purged);
 
