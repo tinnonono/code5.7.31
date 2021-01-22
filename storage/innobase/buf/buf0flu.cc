@@ -2995,6 +2995,9 @@ Wait until all flush requests are finished.
 @param n_flushed_list	number of pages flushed from the end of the
 			flush_list.
 @return			true if all flush_list flushing batch were success. */
+/*  
+	主要由协调线程调用，它主要用来收集每个工作线程分别对LRU和flush_list列表刷脏的页数。以及为每个slot清0次轮请求刷脏的页数和重置它的状态为NONE
+*/
 static
 bool
 pc_wait_finished(
@@ -3006,6 +3009,7 @@ pc_wait_finished(
 	*n_flushed_lru = 0;
 	*n_flushed_list = 0;
 
+	/* 协调线程通知工作线程和完成自己的刷脏任务之后，要等在is_finished事件上，知道最后一个完成的工作线程会set这个事件唤醒协调线程 */
 	os_event_wait(page_cleaner->is_finished);
 
 	mutex_enter(&page_cleaner->mutex);
@@ -3019,17 +3023,22 @@ pc_wait_finished(
 
 		ut_ad(slot->state == PAGE_CLEANER_STATE_FINISHED);
 
+		/* 统计每个slot分别通过LRU和flush_list队列刷出去的页数 */
 		*n_flushed_lru += slot->n_flushed_lru;
 		*n_flushed_list += slot->n_flushed_list;
 		all_succeeded &= slot->succeeded_list;
 
+		/* 把所有slot的状态设置为NONE */
 		slot->state = PAGE_CLEANER_STATE_NONE;
 
+		/* 为每个slot清除请求刷脏的页数 */
 		slot->n_pages_requested = 0;
 	}
 
+	/* 清零完成的slot刷脏个数，为下一轮刷脏重新统计做准备 */
 	page_cleaner->n_slots_finished = 0;
 
+	/* 清除is_finished事件的通知标志 */
 	os_event_reset(page_cleaner->is_finished);
 
 	mutex_exit(&page_cleaner->mutex);
