@@ -2163,6 +2163,7 @@ srv_master_do_active_tasks(void)
 	}
 
 	if (trx_sys->rseg_history_len > 0) {
+		/* 唤起undo page purge线程 */
 		srv_wake_purge_thread_if_not_active();
 	}
 
