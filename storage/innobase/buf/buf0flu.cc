@@ -2381,11 +2381,13 @@ buf_flush_wait_LRU_batch_end(void)
 Calculates if flushing is required based on number of dirty pages in
 the buffer pool.
 @return percent of io_capacity to flush to manage dirty page ratio */
+/* 计算出一个刷新百分比 */
 static
 ulint
 af_get_pct_for_dirty()
 /*==================*/
 {
+	/* 得到 修改的块/总的块的 的百分比 记住脏数据比率 */
 	double	dirty_pct = buf_get_modified_ratio_pct();
 
 	if (dirty_pct == 0.0) {
@@ -2396,17 +2398,22 @@ af_get_pct_for_dirty()
 	ut_a(srv_max_dirty_pages_pct_lwm
 	     <= srv_max_buf_pool_modified_pct);
 
+	/* 如果innodb_max_dirty_pages_pct_lwm没有设置 */
 	if (srv_max_dirty_pages_pct_lwm == 0) {
 		/* The user has not set the option to preflush dirty
 		pages as we approach the high water mark. */
+		/* 如果脏数据比率大于了innodb_max_dirty_pages_pct则返回比率100% */
 		if (dirty_pct >= srv_max_buf_pool_modified_pct) {
 			/* We have crossed the high water mark of dirty
 			pages In this case we start flushing at 100% of
 			innodb_io_capacity. */
 			return(100);
 		}
+	/* 如果设置了innodb_max_dirty_pages_pct_lwm 并且脏数据比率大于了 */	
 	} else if (dirty_pct >= srv_max_dirty_pages_pct_lwm) {
 		/* We should start flushing pages gradually. */
+		/* innodb_max_dirty_pages_pct_lwm参数设置 */
+		/* 则返回  (脏数据比率/(innodb_max_dirty_pages_pct+1))*100 也是一个比率  如(45/76)*100 */
 		return(static_cast<ulint>((dirty_pct * 100)
 		       / (srv_max_buf_pool_modified_pct + 1)));
 	}
@@ -2417,6 +2424,7 @@ af_get_pct_for_dirty()
 /*********************************************************************//**
 Calculates if flushing is required based on redo generation rate.
 @return percent of io_capacity to flush to manage redo space */
+/* 计算出lsn的比率 百分比 */
 static
 ulint
 af_get_pct_for_lsn(
@@ -2425,16 +2433,21 @@ af_get_pct_for_lsn(
 {
 	lsn_t	max_async_age;
 	lsn_t	lsn_age_factor;
+	/* srv_adaptive_flushing_lwm=10 那么大约就是 logtotalsize*(9/10)*(1/10) 943349 计算一个low water mark */
 	lsn_t	af_lwm = (srv_adaptive_flushing_lwm
 			  * log_get_capacity()) / 100;
 
+	/* 如果当前生成的redo 小于了 low water master 则返回0 也就是说 redo日志量生成量不高则不需要权衡 */		  
 	if (age < af_lwm) {
 		/* No adaptive flushing. */
+		/* 可以看出这里和redo设置的大小有关，如果redo文件设置越大则af_lwm越大，触发权衡的机率越小 */
 		return(0);
 	}
 
+	/* 获取需要异步刷新的的位置 大约为logtotalsize*(9/10)*(7/8) */
 	max_async_age = log_get_max_modified_age_async();
 
+	/* 如果小于异步刷新 且 自适应flush 没有开启 */
 	if (age < max_async_age && !srv_adaptive_flushing) {
 		/* We have still not reached the max_async point and
 		the user has disabled adaptive flushing. */
@@ -2445,10 +2458,14 @@ af_get_pct_for_lsn(
 	1) User has enabled adaptive flushing
 	2) User may have disabled adaptive flushing but we have reached
 	max_async_age. */
+	/* /比率lsn_age_factor = (本次刷新的日志量/(logtotalsize*(9/10)*(7/8))) */
 	lsn_age_factor = (age * 100) / max_async_age;
 
 	ut_ad(srv_max_io_capacity >= srv_io_capacity);
+	/* innodb_cleaner_lsn_age_factor参数默认设置为high_checkpoint */
 	return(static_cast<ulint>(
+		/* ((max_io_cap /io_cap) * (sqrt(lsn_age_factor)*lsn_age_factor*lsn_age_factor))/700.5 */
+		/* (10 * (3.3*10*10))/700 =4.3 */
 		((srv_max_io_capacity / srv_io_capacity)
 		* (lsn_age_factor * sqrt((double)lsn_age_factor)))
 		/ 7.5));
@@ -2462,6 +2479,7 @@ need to do flushing.
 @param lsn_limit	pointer to return LSN up to which flushing must happen
 @param last_pages_in	the number of pages flushed by the last flush_list
 			flushing. */
+/* 计算刷新多少个块 */			
 static
 ulint
 page_cleaner_flush_pages_recommendation(
@@ -2483,15 +2501,19 @@ page_cleaner_flush_pages_recommendation(
 	ulint			pct_for_lsn = 0;
 	ulint			pct_total = 0;
 
+	/* 获取当前的lsn 在 redo buffer中的 */
 	cur_lsn = log_get_lsn();
 
+	/* 静态变量如果是0则代表是第一次执行本函数 */
 	if (prev_lsn == 0) {
 		/* First time around. */
 		prev_lsn = cur_lsn;
+		/* 获取当前时间 */
 		prev_time = ut_time_monotonic();
 		return(0);
 	}
 
+	/* 如果没有redo日志生成 */
 	if (prev_lsn == cur_lsn) {
 		return(0);
 	}
@@ -2511,6 +2533,7 @@ page_cleaner_flush_pages_recommendation(
 			time_elapsed = 1;
 		}
 
+		/* 算出上次刷新每秒刷新的pages数量，同时加上次计算的每秒平均刷新块数 然后除以2 得到一个每秒刷新的pages数量 ！！！第一个计算条件avg_page_rate 生成 */
 		avg_page_rate = static_cast<ulint>(
 			((static_cast<double>(sum_pages)
 			  / time_elapsed)
@@ -2521,6 +2544,7 @@ page_cleaner_flush_pages_recommendation(
 			static_cast<double>(cur_lsn - prev_lsn)
 			/ time_elapsed);
 
+		/* 计算redo每秒平均生成率 */
 		lsn_avg_rate = (lsn_avg_rate + lsn_rate) / 2;
 
 
@@ -2538,6 +2562,7 @@ page_cleaner_flush_pages_recommendation(
 		ulint	lru_pass = 0;
 		ulint	list_pass = 0;
 
+		/* 扫描所有的槽 */
 		for (ulint i = 0; i < page_cleaner->n_slots; i++) {
 			page_cleaner_slot_t*	slot;
 
@@ -2608,47 +2633,61 @@ page_cleaner_flush_pages_recommendation(
 		sum_pages = 0;
 	}
 
+	/* 获取flush list中最老的ls */
 	oldest_lsn = buf_pool_get_oldest_modification();
 
 	ut_ad(oldest_lsn <= log_get_lsn());
 
+	/* 获取当前LSN和最老LSN的之间的差值 */
 	age = cur_lsn > oldest_lsn ? cur_lsn - oldest_lsn : 0;
 
+	/* 计算出一个刷新百分比 (比如100) */
 	pct_for_dirty = af_get_pct_for_dirty();
+	/* 计算出lsn的比率 百分比(例如4.5) */
 	pct_for_lsn = af_get_pct_for_lsn(age);
 
+	/* 取他们的大值 */
 	pct_total = ut_max(pct_for_dirty, pct_for_lsn);
 
 	/* Estimate pages to be flushed for the lsn progress */
+	/* 计算target_lsn */
 	ulint	sum_pages_for_lsn = 0;
+	/* 计算下一次刷新的  目标lsn 及target_lsnbuf_flush_lsn_scan_factor是定值3 */
 	lsn_t	target_lsn = oldest_lsn
 			     + lsn_avg_rate * buf_flush_lsn_scan_factor;
 
+	/* 循环整个buffer instance找到小于target_lsn的脏块 */
 	for (ulint i = 0; i < srv_buf_pool_instances; i++) {
 		buf_pool_t*	buf_pool = buf_pool_from_array(i);
 		ulint		pages_for_lsn = 0;
 
 		buf_flush_list_mutex_enter(buf_pool);
+		/* 每个innodb buffer的末尾的flush list 进行扫描，头插法? */
 		for (buf_page_t* b = UT_LIST_GET_LAST(buf_pool->flush_list);
 		     b != NULL;
 		     b = UT_LIST_GET_PREV(list, b)) {
 			if (b->oldest_modification > target_lsn) {
 				break;
 			}
+			/* 某个 innodb buffer 实例中 flush list 小于这个  target lsn 的 page计数 */
 			++pages_for_lsn;
 		}
 		buf_flush_list_mutex_exit(buf_pool);
 
+		/* 这里汇总所有 innodb buffer实例中  flush list 小于这个  target lsn 的 page 总数 */
 		sum_pages_for_lsn += pages_for_lsn;
 
 		mutex_enter(&page_cleaner->mutex);
+		/* 断言所有的槽处于没有刷新状态 */
 		ut_ad(page_cleaner->slots[i].state
 		      == PAGE_CLEANER_STATE_NONE);
+		/* 确认槽的n_pages_requested值 */	  
 		page_cleaner->slots[i].n_pages_requested
 			= pages_for_lsn / buf_flush_lsn_scan_factor + 1;
 		mutex_exit(&page_cleaner->mutex);
 	}
 
+	/* buf_flush_lsn_scan_factor为定值3 */
 	sum_pages_for_lsn /= buf_flush_lsn_scan_factor;
 	if(sum_pages_for_lsn < 1) {
 		sum_pages_for_lsn = 1;
@@ -2656,9 +2695,12 @@ page_cleaner_flush_pages_recommendation(
 
 	/* Cap the maximum IO capacity that we are going to use by
 	max_io_capacity. Limit the value to avoid too quick increase */
+	/* 即便是需要刷新的块数很多，最多只能刷max_io_capacity*2的数量!!!第三个计算参数生成 */
 	ulint	pages_for_lsn =
 		std::min<ulint>(sum_pages_for_lsn, srv_max_io_capacity * 2);
 
+	/* PCT_IO(pct_total) 根据 前面得到的 pct_total 和 srv_io_capacity参数得到 刷新的块数 !!!第二个计算参数生成 */
+	/* 3部分组成 1、根据参数计算出来的IO能力 2、以往每秒刷新页的数量 3、根据target lsn 计算出来的一个需要刷新的块数 */
 	n_pages = (PCT_IO(pct_total) + avg_page_rate + pages_for_lsn) / 3;
 
 	if (n_pages > srv_max_io_capacity) {
@@ -3183,6 +3225,121 @@ buf_flush_page_cleaner_disabled_debug_update(
 page_cleaner thread tasked with flushing dirty pages from the buffer
 pools. As of now we'll have only one coordinator.
 @return a dummy parameter */
+/*  
+	buffer pool是通过三种list来管理的
+		1 free list
+		2 lru list
+		3 flush list
+
+	buffer pool中的最小单位是page，在innodb中定义三种page
+		1 free page
+			此page未被使用，此种类型page位于free链表中
+		2 clean page
+			此page被使用，对应数据文件中的一个页面，但是页面没有被修改，此种类型page位于lru链表中
+		3 dirty page
+			此page被使用，对应数据文件中的一个页面，但是页面被修改过，此种类型page位于lru链表和flush链表中
+
+	flush list  ----[]----[]----[]----[]----[]----[]---->
+					↓ 指针		↓ 指针
+	lru list    ----[]----[]----[]----[]----[]----[]---->
+							↓	转换	  ↑ 转换	
+	free list   ----[]----[]----[]----[]----[]----[]---->
+
+	当buffer pool不够用时，根据lru机制，mysql会将old sublist部分的缓存页移出lru链表。
+	如果被移除出去的缓存页的描述信息在flush list中，mysql就得将其刷新回磁盘。
+
+	在flush list中存在的page只能是dirty page，flush list中存在的dirty page是按着oldest_modification时间排序的，
+	当页面访问/修改都被封装为一个mini-transaction，mini-transactin提交的时候，则mini-transaction涉及到的页面就进入了flush链表中，
+	oldest_modification的值越大，说明page越晚被修改过，就排在flush链表的头部，
+	oldest_modification的值越小，说明page越早被修改过，就排在flush链表的尾部，
+	这样当flush链表做flush动作时，从flush链表的尾部开始scan，写出一定数量的dirty page到磁盘，推进checkpoint点，使恢复的时间尽可能的短。
+	
+	除了flush链表本身的flush操作可以把dirty page从flush链表删除外，lru链表的flush操作也会让dirty page从flush链表删除。
+
+	Flush LRU 与 Flush FLUSH_LIST 区别
+		1、	LRU list flush，其目的是为了写出LRU 链表尾部的dirty page，释放足够的free pages，当buf pool满的时候，用户可以立即获得空闲页面，而不需要长时间等待；
+			Flush list flush，其目的是推进Checkpoint LSN，使得InnoDB系统崩溃之后能够快速的恢复。
+		2、	LRU list flush，其写出的dirty page，是直接从LRU链表中删除，移动到free list(MySQL 5.6.2之后版本)。
+			Flush list flush，不需要移动page在LRU链表中的位置。
+		3、	LRU list flush，每次flush的dirty pages数量较少，基本固定，只要释放一定的free pages即可；
+			Flush list flush，根据当前系统的更新繁忙程度，动态调整一次flush的dirty pages数量，量很大。
+
+	查看LRU中的页
+		select table_name,space,page_number,page_type from information_schema.innodb_buffer_page_lru ;
+			+--------------------------------------------------------------------------+-------+-------------+-------------------+
+			| table_name                                                               | space | page_number | page_type         |
+			+--------------------------------------------------------------------------+-------+-------------+-------------------+
+			| NULL                                                                     |     0 |           3 | SYSTEM            |
+			| NULL                                                                     |     8 |           1 | IBUF_BITMAP       |
+			| NULL                                                                     |     8 |           2 | INODE             |
+			| `mysql`.`time_zone_name`                                                 |     8 |           3 | INDEX             |
+			| NULL                                                                     |    16 |           1 | IBUF_BITMAP       |
+			| NULL                                                                     |    16 |           2 | INODE             |
+			| `mysql`.`slave_master_info`                                              |    16 |           3 | INDEX             |
+			| NULL                                                                     |   240 |           1 | IBUF_BITMAP       |
+
+	查看脏页
+		select table_name,space,page_number,page_type from information_schema.innodb_buffer_page_lru where oldest_modification>0;
+			1+--------------+-------+-------------+-----------+
+			| table_name   | space | page_number | page_type |
+			+--------------+-------+-------------+-----------+
+			| `SYS_TABLES` |   433 |          64 | INDEX     |
+			| `SYS_TABLES` |   433 |          65 | INDEX     |
+			| `SYS_TABLES` |   433 |          66 | INDEX     |
+			| `SYS_TABLES` |   433 |          67 | INDEX     |
+			| `SYS_TABLES` |   433 |        1280 | INDEX     |
+
+*/
+/*  
+DECLARE_THREAD(buf_flush_page_cleaner_coordinator)          协调线程
+    |__my_thread_init
+    |----InnoDB从崩溃中恢复时的处理   
+    |__while (!srv_read_only_mode && srv_shutdown_state == SRV_SHUTDOWN_NONE && recv_sys->heap != NULL)
+    |   |__os_event_wait(recv_sys->flush_start)
+    |   |__pc_request(0, LSN_MAX)                   只刷新LRU，为每个slot计算要刷多少页，实际页数在page_cleaner_flush_pages_recommendation计算
+    |   |   |__os_event_set(page_cleaner->is_requested)       这会唤起page cleaner worker线程，工作线程会调用pc_flush_slot执行刷新 
+    |   |__pc_request(ULINT_MAX, LSN_MAX)           刷新LRU和FLUSH LIST，为每个slot计算要刷多少页
+    |   |   |__os_event_set(page_cleaner->is_requested)
+    |   |__pc_flush_slot()                  实际刷新
+    |   |__pc_wait_finished(&n_flushed_lru, &n_flushed_list)
+    |----一般情况下的处理
+    |__while (srv_shutdown_state == SRV_SHUTDOWN_NONE)          
+    |   |-------检测是否需要睡眠1秒-----------------------------------------------------------------------------------------------    
+    |   |__if (srv_check_activity(last_activity)|| buf_get_n_pending_read_ios() || n_flushed == 0)    是否需要睡眠1秒判断，如果有有活跃的线程、或有pending的物理块、或上次刷新的块数量为0，则睡眠1秒
+    |   |   |__pc_sleep_if_needed                                   休眠min(1000000,(next_loop_time-当前时间)*1000))
+    |   |__else if (ut_time_monotonic_ms() > next_loop_time)        如果当前时间大于 上次刷新 时间+1 秒则 设置为OS_SYNC_TIME_EXCEEDED
+    |   |__else
+    |   |-------检测是否需要输出IO能力不足警告-----------------------------------------------------------------------------------------------        
+    |   |__if (ret_sleep == OS_SYNC_TIME_EXCEEDED)                  如果当前时间 大于 上次刷新时间+1秒 则判断是否需要输出IO能力不足警告
+    |   |   |__if (curr_time > next_loop_time + 3000)                   如果刷新时间 大于了 上次时间 +1 秒+3 秒 则报info，即IO能力不足警告
+    |   |-------同步刷新---------------------------------------------------------------------------------------------------------------------
+    |   |__if (ret_sleep != OS_SYNC_TIME_EXCEEDED && srv_flush_sync && buf_flush_sync_lsn > 0)         
+    |   |   |__pc_request(ULINT_MAX, lsn_limit)    唤起工作线程刷新
+    |   |   |__pc_flush_slot()                     协调线程自己也需要刷新
+    |   |   |__pc_wait_finished
+    |   |-------活跃刷新---------------------------------------------------------------------------------------------------------------------
+    |   |__else if (srv_check_activity(last_activity))
+    |   |   |__page_cleaner_flush_pages_recommendation      计算刷新多少个块
+    |   |   |__pc_request(n_to_flush, lsn_limit)
+    |   |   |__pc_flush_slot
+    |   |   |__pc_wait_finished
+    |   |-------空闲刷新---------------------------------------------------------------------------------------------------------------------
+    |   |__else if (ret_sleep == OS_SYNC_TIME_EXCEEDED)
+    |       |__buf_flush_lists(PCT_IO(100), LSN_MAX, &n_flushed)
+    |           |__buf_flush_do_batch
+    |----InnoDB正常关闭情况下的处理
+    |__do while (srv_shutdown_state == SRV_SHUTDOWN_CLEANUP)
+    |   |__pc_request(ULINT_MAX, LSN_MAX)
+    |   |__pc_flush_slot
+    |   |__pc_wait_finished
+    |__buf_flush_wait_batch_end
+    |__buf_flush_wait_LRU_batch_end
+    |__do while (!success || n_flushed > 0)
+        |__pc_request(ULINT_MAX, LSN_MAX)
+        |__pc_flush_slot
+        |__pc_wait_finished
+        |__pc_wait_finished
+*/
 /* page cleaner线程从buffer pool中刷脏页 */
 extern "C"
 os_thread_ret_t
@@ -3225,7 +3382,11 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 
 	buf_page_cleaner_is_active = true;
 
-	/* 服务器运行情况下 */
+	/* 
+--------------------------------------------------------------------------------------------------------------
+		InnoDB从崩溃中恢复时的处理 
+		recv_sys为在崩溃恢复前滚阶段使用的内存结构
+	*/
 	while (!srv_read_only_mode
 	       && srv_shutdown_state == SRV_SHUTDOWN_NONE
 	       && recv_sys->heap != NULL) {
@@ -3241,72 +3402,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 			break;
 		}
 
-		switch (recv_sys->flush_type) {
-		/*  
-			buffer pool是通过三种list来管理的
-				1 free list
-				2 lru list
-				3 flush list
-
-			buffer pool中的最小单位是page，在innodb中定义三种page
-				1 free page
-					此page未被使用，此种类型page位于free链表中
-				2 clean page
-					此page被使用，对应数据文件中的一个页面，但是页面没有被修改，此种类型page位于lru链表中
-				3 dirty page
-					此page被使用，对应数据文件中的一个页面，但是页面被修改过，此种类型page位于lru链表和flush链表中
-
-			flush list  ----[]----[]----[]----[]----[]----[]---->
-							↓ 指针		↓ 指针
-			lru list    ----[]----[]----[]----[]----[]----[]---->
-								  ↓	转换	  ↑ 转换	
-			free list   ----[]----[]----[]----[]----[]----[]---->
-
-			当buffer pool不够用时，根据lru机制，mysql会将old sublist部分的缓存页移出lru链表。
-			如果被移除出去的缓存页的描述信息在flush list中，mysql就得将其刷新回磁盘。
-
-			在flush list中存在的page只能是dirty page，flush list中存在的dirty page是按着oldest_modification时间排序的，
-			当页面访问/修改都被封装为一个mini-transaction，mini-transactin提交的时候，则mini-transaction涉及到的页面就进入了flush链表中，
-			oldest_modification的值越大，说明page越晚被修改过，就排在flush链表的头部，
-			oldest_modification的值越小，说明page越早被修改过，就排在flush链表的尾部，
-			这样当flush链表做flush动作时，从flush链表的尾部开始scan，写出一定数量的dirty page到磁盘，推进checkpoint点，使恢复的时间尽可能的短。
-			
-			除了flush链表本身的flush操作可以把dirty page从flush链表删除外，lru链表的flush操作也会让dirty page从flush链表删除。
-
-			Flush LRU 与 Flush FLUSH_LIST 区别
-				1、	LRU list flush，其目的是为了写出LRU 链表尾部的dirty page，释放足够的free pages，当buf pool满的时候，用户可以立即获得空闲页面，而不需要长时间等待；
-					Flush list flush，其目的是推进Checkpoint LSN，使得InnoDB系统崩溃之后能够快速的恢复。
-				2、	LRU list flush，其写出的dirty page，是直接从LRU链表中删除，移动到free list(MySQL 5.6.2之后版本)。
-					Flush list flush，不需要移动page在LRU链表中的位置。
-				3、	LRU list flush，每次flush的dirty pages数量较少，基本固定，只要释放一定的free pages即可；
-					Flush list flush，根据当前系统的更新繁忙程度，动态调整一次flush的dirty pages数量，量很大。
-
-			查看LRU中的页
-				select table_name,space,page_number,page_type from information_schema.innodb_buffer_page_lru ;
-					+--------------------------------------------------------------------------+-------+-------------+-------------------+
-					| table_name                                                               | space | page_number | page_type         |
-					+--------------------------------------------------------------------------+-------+-------------+-------------------+
-					| NULL                                                                     |     0 |           3 | SYSTEM            |
-					| NULL                                                                     |     8 |           1 | IBUF_BITMAP       |
-					| NULL                                                                     |     8 |           2 | INODE             |
-					| `mysql`.`time_zone_name`                                                 |     8 |           3 | INDEX             |
-					| NULL                                                                     |    16 |           1 | IBUF_BITMAP       |
-					| NULL                                                                     |    16 |           2 | INODE             |
-					| `mysql`.`slave_master_info`                                              |    16 |           3 | INDEX             |
-					| NULL                                                                     |   240 |           1 | IBUF_BITMAP       |
-
-			查看脏页
-				select table_name,space,page_number,page_type from information_schema.innodb_buffer_page_lru where oldest_modification>0;
-					1+--------------+-------+-------------+-----------+
-					| table_name   | space | page_number | page_type |
-					+--------------+-------+-------------+-----------+
-					| `SYS_TABLES` |   433 |          64 | INDEX     |
-					| `SYS_TABLES` |   433 |          65 | INDEX     |
-					| `SYS_TABLES` |   433 |          66 | INDEX     |
-					| `SYS_TABLES` |   433 |          67 | INDEX     |
-					| `SYS_TABLES` |   433 |        1280 | INDEX     |
-
-		*/	
+		switch (recv_sys->flush_type) {	
 		/* 刷新LRU脏页 */	
 		case BUF_FLUSH_LRU:
 			/* Flush pages from end of LRU if required */
@@ -3357,13 +3453,20 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 	ulint		warn_count = 0;
 	int64_t		sig_count = os_event_reset(buf_flush_event);
 
+	/*
+--------------------------------------------------------------------------------------------------------------
+		一般情况下的处理	  
+	*/
 	while (srv_shutdown_state == SRV_SHUTDOWN_NONE) {
 		/* 这个睡眠是可以被唤醒的，比如同步刷新应该就会唤醒它（buf_flush_request_force函数）。参考函数os_event::wait_time_low */
 
 		/* The page_cleaner skips sleep if the server is
 		idle and there are no pending IOs in the buffer pool
 		and there is work to do. */
-		/* 检查当前服务器的活动次数 */
+		/*  
+			是否需要睡眠1秒判断
+			如果有有活跃的线程、或有pending的物理块、或上次刷新的块数量为0，则睡眠1秒
+		*/
 		if (srv_check_activity(last_activity)
 		    || buf_get_n_pending_read_ios()
 		    || n_flushed == 0) {
@@ -3374,7 +3477,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 			if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
 				break;
 			}
-		/* 如果当前时间大于 上次刷新 时间+1 秒则 设置为OS_SYNC_TIME_EXCEEDED */
+		/* 如果当前时间 大于 上次刷新时间+1秒 则设置为OS_SYNC_TIME_EXCEEDED */
 		} else if (ut_time_monotonic_ms() > next_loop_time) {
 			ret_sleep = OS_SYNC_TIME_EXCEEDED;
 		} else {
@@ -3383,11 +3486,14 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 
 		sig_count = os_event_reset(buf_flush_event);
 
+		/*  
+			如果当前时间 大于 上次刷新时间+1秒 则判断是否需要输出IO能力不足警告
+		*/
 		if (ret_sleep == OS_SYNC_TIME_EXCEEDED) {
 			ib_time_monotonic_ms_t curr_time =
 						ut_time_monotonic_ms();
 
-			/* 如果刷新时间 大于了 上次时间 +1 秒+3 秒 则报info */
+			/* 如果刷新时间 大于 上次时间 +1 秒+3 秒 则输出IO能力不足警告 */
 			if (curr_time > next_loop_time + 3000) {
 				if (warn_count == 0) {
 					ib::info() << "page_cleaner: 1000ms"
@@ -3422,6 +3528,8 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 		}
 
 		/*  
+			--------------------------------------------------------------------------------------------
+			同步刷新 
 			同步会唤醒正在睡眠状态的page clean协调工作线程那么睡眠应该不会满足一秒的条件所以不会被标记为OS_SYNC_TIME_EXCEEDED，
 			同时srv_flush_sync和buf_flush_sync_lsn均会被设置接下来就是唤醒工作线程进行刷新，同时本协调线程也完成部分任务。
 		*/
@@ -3435,12 +3543,23 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 			mutex_exit(&page_cleaner->mutex);
 
 			/* Request flushing for threads */
+			/* 
+				为每个slot代表的缓冲池实例计算要刷脏多少页；
+				然后把每个slot的state设置PAGE_CLEANER_STATE_REQUESTED；
+				把n_slots_requested设置成当前slots的总数，也即缓冲池实例的个数，
+				同时把n_slots_flushing和n_slots_finished清0，
+				然后唤醒等待的工作线程 
+			*/
 			/* 唤醒page clean 工作线程干活 */
 			pc_request(ULINT_MAX, lsn_limit);
 
 			ib_time_monotonic_ms_t tm = ut_time_monotonic_ms();
 
 			/* Coordinator also treats requests */
+			/* 
+				实际执行刷新的函数 
+				协调线程和工作线程都会执行
+			*/
 			/* 协调者同样要完成部分任务 */
 			while (pc_flush_slot() > 0) {}
 
@@ -3452,6 +3571,10 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 			/* Wait for all slots to be finished */
 			ulint	n_flushed_lru = 0;
 			ulint	n_flushed_list = 0;
+			/*  
+				主要由协调线程调用，它主要用来收集每个工作线程分别对LRU和flush_list列表刷脏的页数。
+				以及为每个slot清0次轮请求刷脏的页数和重置它的状态为NONE
+			*/
 			pc_wait_finished(&n_flushed_lru, &n_flushed_list);
 
 			if (n_flushed_list > 0 || n_flushed_lru > 0) {
@@ -3466,7 +3589,11 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 
 			n_flushed = n_flushed_lru + n_flushed_list;
 
-		} else if (srv_check_activity(last_activity)) {   /* 检查当前服务器活动数量 */
+		/*  
+			--------------------------------------------------------------------------------------------
+			活跃刷新
+		*/
+		} else if (srv_check_activity(last_activity)) {   /* 是否有活跃的线程 */
 			ulint	n_to_flush;
 			lsn_t	lsn_limit = 0;
 
@@ -3474,6 +3601,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 			if (ret_sleep == OS_SYNC_TIME_EXCEEDED) {
 				last_activity = srv_get_activity_count();
 				n_to_flush =
+					/* 计算刷新多少个块 */
 					page_cleaner_flush_pages_recommendation(
 						&lsn_limit, last_pages);
 			} else {
@@ -3530,9 +3658,14 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 					n_flushed_list);
 			}
 
+		/*  
+			--------------------------------------------------------------------------------------------
+			空闲刷新
+		*/
 		} else if (ret_sleep == OS_SYNC_TIME_EXCEEDED) {
 			/* no activity, slept enough */
 			/* 刷新srv_io_capacity个脏页到磁盘 */
+			/* PCT_IO(100) = ((ulong) (srv_io_capacity * ((double) (100) / 100.0))) */
 			buf_flush_lists(PCT_IO(100), LSN_MAX, &n_flushed);
 
 			n_flushed_last += n_flushed;
@@ -3574,7 +3707,10 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 	and the purge threads may be working as well. We start flushing
 	the buffer pool but can't be sure that no new pages are being
 	dirtied until we enter SRV_SHUTDOWN_FLUSH_PHASE phase. */
-
+	/*
+--------------------------------------------------------------------------------------------------------------
+		InnoDB正常关闭情况下的处理	  
+	*/
 	do {
 		pc_request(ULINT_MAX, LSN_MAX);
 
