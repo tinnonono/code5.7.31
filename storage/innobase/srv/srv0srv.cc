@@ -2852,6 +2852,8 @@ DECLARE_THREAD(srv_purge_coordinator_thread)(
 		    && (purge_sys->state == PURGE_STATE_STOP
 			|| n_total_purged == 0)) {
 			/* 协调线程循环检测变化 */
+			/* 如果当前history_len大于等于上一次循环的的history_len  等待10毫秒后进行处理或者等待被唤醒 */
+			/* 如果上次的history_len和本次history_len相同且小于5000那么需要等待唤醒，则进行无限期等待，直到唤醒 */
 			srv_purge_coordinator_suspend(slot, rseg_history_len);
 		}
 

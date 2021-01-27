@@ -614,9 +614,9 @@ buf_flush_ready_for_replace(
 
 	if (buf_page_in_file(bpage)) {
 
-		return(bpage->oldest_modification == 0
-		       && bpage->buf_fix_count == 0
-		       && buf_page_get_io_fix(bpage) == BUF_IO_NONE);
+		return(bpage->oldest_modification == 0		/* Block 没有被修改 */
+		       && bpage->buf_fix_count == 0			/* 没有线程正在读该 Page */
+		       && buf_page_get_io_fix(bpage) == BUF_IO_NONE);	/* 表示该页目前没有任何 IO 操作 */
 	}
 
 	ib::fatal() << "Buffer block " << bpage << " state " <<  bpage->state
@@ -3456,6 +3456,19 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 	/*
 --------------------------------------------------------------------------------------------------------------
 		一般情况下的处理	  
+	
+	recovery处理完之后，协调线程进入日常执行的阶段，开始等待buf_flush_event。os_event_set(buf_flush_event)将唤醒page cleaner来flush脏页。
+	有以下五个时机：
+		prepareSpace btr0bulk.cc 索引构建时
+		buf_LRU_get_free_block buf0lru.cc 为了分配空闲块而调用
+		buf_flush_request_force buf0flu.cc 这里是同步的flush请求，在做检查点时调用。
+		srv_shutdown_all_bg_threads srv0start.cc 关闭所有innodb后台线程
+		srv_start srv0start.cc 启动时
+		srv_shutdown_page_cleaners srv0start.cc 关闭innodb database时调用
+		我们从上面可以看出flush活动出现的时机。
+
+	首先调用pc_sleep_if_needed判断要睡多久，首先对返回值ret_sleep做处理。 
+	ret_sleep == OS_SYNC_TIME_EXCEEDED 如果超时，则会重新计算下次sleep的时间。
 	*/
 	while (srv_shutdown_state == SRV_SHUTDOWN_NONE) {
 		/* 这个睡眠是可以被唤醒的，比如同步刷新应该就会唤醒它（buf_flush_request_force函数）。参考函数os_event::wait_time_low */
@@ -3532,6 +3545,8 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 			同步刷新 
 			同步会唤醒正在睡眠状态的page clean协调工作线程那么睡眠应该不会满足一秒的条件所以不会被标记为OS_SYNC_TIME_EXCEEDED，
 			同时srv_flush_sync和buf_flush_sync_lsn均会被设置接下来就是唤醒工作线程进行刷新，同时本协调线程也完成部分任务。
+
+			这是同步flush的请求，如果到了同步阶段，所有活动都停下等这个同步的flush完成。包括协调器线程本身，也参与到flush工作中来。
 		*/
 		if (ret_sleep != OS_SYNC_TIME_EXCEEDED
 		    && srv_flush_sync
@@ -3592,6 +3607,9 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 		/*  
 			--------------------------------------------------------------------------------------------
 			活跃刷新
+
+			这时是说明有其他活动在进行，那么调用page_cleaner_flush_pages_recommendation计算要flush的page数目，这里就是adaptive flushing算法的所在。
+			关于自适应刷新的有关参数，则是在af_get_pct_for_dirty中计算，并且根据配置的IO能力在page_cleaner_flush_pages_recommendation中设置了下次flush的目标。
 		*/
 		} else if (srv_check_activity(last_activity)) {   /* 是否有活跃的线程 */
 			ulint	n_to_flush;
@@ -3661,6 +3679,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(
 		/*  
 			--------------------------------------------------------------------------------------------
 			空闲刷新
+			这时已经检查了没有其他活动在进行，也即是idle， 那么就进行批量flush操作。
 		*/
 		} else if (ret_sleep == OS_SYNC_TIME_EXCEEDED) {
 			/* no activity, slept enough */
